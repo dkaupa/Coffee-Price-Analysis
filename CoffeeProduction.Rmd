@@ -1,0 +1,949 @@
+---
+title: "Coffee Production"
+author: "Daniel Kaupa"
+date: "Original: 4/28/2020"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+#knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+#Setting Up Directory
+```{r}
+#use this function to get your current working directory
+getwd()
+
+#use this function to change the directory as needed
+setwd('')
+
+
+```
+
+
+
+
+ A note about the contents of this file : all "view()" functions are commented out. While they are useful during initial analyses, they can become annoying when running all chunks. Know that throughout many parts of this file, the view function is already set up to allow observation of certain data, you must simply uncomment it.
+
+# Setting Up Libraries
+```{r}
+library(readxl)
+library(dslabs)
+library(ggplot2)
+library(tidyverse)
+library(dplyr)
+library(dbplyr)
+library(caret)
+library(tree)
+library(randomForest)
+library(car)
+library(visdat)
+library(naniar)
+library(zoom)
+library(graphics)
+```
+
+# Cleaning Up the Data
+```{r}
+# The following dataset was pulled from https://quickstats.nass.usda.gov/.
+
+data_raw <- read.csv(file='USDA_Data.csv', colClasses = c(Period ="factor"))
+
+# If you look at the data, it was already filtered to the time period "Marketing Year" when pulled from the USDA website.
+# Although there are other time periods for which records are available, this was the time period that contained the most and the most consistent records.
+
+summary(data_raw)
+head(data_raw)
+
+# A number of columns automatically included in the dataset are not needed for the purposes of this analysis.
+
+data_raw_sub <- subset(data_raw, select = -c(Program,
+                              Week.Ending,
+                               Geo.Level,
+                               State.ANSI,
+                               Ag.District,
+                               Ag.District.Code,
+                               County,
+                               County.ANSI,
+                               Zip.Code,
+                               Region,
+                               watershed_code,
+                               Watershed,
+                               Domain,
+                               Domain.Category,
+                               CV....))
+
+head(data_raw_sub)
+summary(data_raw_sub)
+#View(data_raw_sub)
+
+# To gain a more broad view of the data as well as reduce complexity, this project focuses on the national data rather than looking at states individually.
+
+data_nat <- filter(data_raw_sub, State == "US TOTAL") 
+#View(data_nat)
+
+# At this point the time "Period" column with the value "Marketing Year" is redundant and no longer needed.
+
+data_nat <- select(data_nat, -Period)
+data_nat
+
+# Additionally, there is not much need for keeping the "State" column it is known that the data is for the entire US.
+
+data_nat1 <- select(data_nat, -State)
+data_nat1
+
+# You can see that the amount of data present for each commodity group varies quite a bit.
+# The ultimate goal will be to include commodities that have as much or more data than Coffee
+ggplot(data_nat1) + geom_histogram(mapping = aes(x =Commodity), stat = 'count', bins = 10) + theme(axis.text.x = element_text(angle = 90, hjust = 1)) + labs(y= "Count of Data Recorded", title = "\nAmount of Data recorded per Commodity Group\n") +theme(plot.title = element_text(hjust = 0.5))
+
+# As you can see from this plot, there is fairly little data until there is a spike in the 1960's and then an enormous growth in the amount of data collected/available starting in the 1990's
+ggplot(data_nat1) + geom_density(mapping = aes(x=Year, fill = Commodity), alpha=0.4, show.legend = FALSE) + 
+  theme(axis.text.x = element_text(angle = 90, hjust = 1)) +
+  labs(y= "Count of Data Recorded", title = "\nAmount of Data recorded per Commodity Group\n") +
+  theme(plot.title = element_text(hjust = 0.5))
+
+# This graph illustrates the same concept as the previous graph with a little more specificity
+ggplot(data_nat1) + geom_area(mapping = aes(x =Year, y = as.numeric(Data.Item)), na.rm = TRUE,size =1, color = "blue") + scale_x_continuous(breaks = seq(1900, 2019, by = 5)) +theme(axis.text.x = element_text(angle = 90, hjust = 1)) + labs(y= "Count of Data.Items Recorded", title = "\nAmount of Data.Items recorded by Year\n") +theme(plot.title = element_text(hjust = 0.5))
+
+
+
+
+# The information contained in the "Commodity" although usefeul, is also contained in the "Data.Item" column. Additionally, its removal allows the dataset to respond much better to the 'spread' function in order to transform the data to a more workable format.
+
+data_nat_concise <- select(data_nat1, -Commodity)
+data_nat_concise
+
+# Now left with only 3 columns, the data responds much better to the spread function.
+
+spread_data_nat <- spread(data_nat_concise, Data.Item, Value)
+spread_data_nat
+
+# In order to view this graphic, you must expand the plot output window.
+# Here , one can see the extensive amount of data that is missing from the data set
+vis_miss(spread_data_nat)
+
+# This graphic illustrates a similar concept as the ggplot graphics previous. There is a substantial amount of data that only recently began to be collected.
+ggplot(data=data_nat_concise) +
+      naniar::geom_miss_point(mapping=aes(x = Year, y = Data.Item), size = 0.25) + scale_y_discrete(labels = abbreviate) +theme(axis.text.x = element_text(angle = 90, hjust = 1), axis.text.y =element_text(size=1.0)) 
+
+#view(spread_data_nat)
+
+# All items lack data for the year 2019, and many lack data for 2018. To avoid dealing with NA values, trimming the data to exclude these years makes the analysis easier.
+# Although some columns contain information all the way back to the year 1900, many columns do not. To retain the a balance of including many years of data and a variety of variables, the lower limit is set to 1967 (inclusive).
+# This provides a simple 50 year spread.
+# Any columns that have NA values are also removed during this step.
+
+spread_data_50yr <- filter(spread_data_nat, Year < 2018  & Year > 1966) %>% select_if(~ !any(is.na(.)))
+
+spread_data_50yr
+#view(spread_data_50yr)
+head(spread_data_50yr)
+summary(spread_data_50yr)
+
+# Columns recording data for the same product are similar to one another. For example if you take the ratio between the first two values in column 2 and then the first two values of column 3 - they are the about same. They appear to collecting data on the same trend, just on different scales.
+# There are some columns with values of 0 present for a numeber of years. These are assumed to mean NA, but were simply recorded as a value of 0 for whatever reason.
+# For these reasons columns 3:5, 7:8, 14:15, 17:18, and 21:22 are removed to eliminate redundancy and missing values.
+
+tweaked_spread_data <- select(spread_data_50yr, -c(3:5,7:8, 14:15, 17:18, 21:22))
+tweaked_spread_data
+
+#view(tweaked_spread_data)
+
+base_data <- tweaked_spread_data
+
+# In the following numerical analyses of 'base_data', one can observe that the values of 'base_data' are all being treated as factors rather than numerical values.
+
+summary(base_data)
+sapply(base_data, class)
+
+# To allow for numerical analyses and operations on this dataset, all of the columns are converted to numerical values.
+
+base_dataNUM <- base_data
+
+base_dataNUM <- mutate(base_dataNUM, 
+                       `APPLES - PRICE RECEIVED, MEASURED IN $ / LB` = as.numeric(`APPLES - PRICE RECEIVED, MEASURED IN $ / LB`), 
+                       `APRICOTS - PRICE RECEIVED, MEASURED IN $ / TON` = as.numeric(`APRICOTS - PRICE RECEIVED, MEASURED IN $ / TON`), 
+                       `CHERRIES, SWEET - PRICE RECEIVED, MEASURED IN $ / TON` = as.numeric(`CHERRIES, SWEET - PRICE RECEIVED, MEASURED IN $ / TON`), 
+                       `CHERRIES, TART - PRICE RECEIVED, MEASURED IN $ / LB` = as.numeric(`CHERRIES, TART - PRICE RECEIVED, MEASURED IN $ / LB`),
+                       `COFFEE - PRICE RECEIVED, MEASURED IN $ / LB` = as.numeric(`COFFEE - PRICE RECEIVED, MEASURED IN $ / LB`),
+                       `CRANBERRIES - PRICE RECEIVED, MEASURED IN $ / BARREL` = as.numeric(`CRANBERRIES - PRICE RECEIVED, MEASURED IN $ / BARREL`),
+                       `GRAPEFRUIT - PRICE RECEIVED, MEASURED IN $ / BOX, PHD EQUIV` = as.numeric(`GRAPEFRUIT - PRICE RECEIVED, MEASURED IN $ / BOX, PHD EQUIV`),
+                       `LEMONS - PRICE RECEIVED, MEASURED IN $ / BOX, PHD EQUIV` = as.numeric(`LEMONS - PRICE RECEIVED, MEASURED IN $ / BOX, PHD EQUIV`),
+                       `ORANGES - PRICE RECEIVED, MEASURED IN $ / BOX, PHD EQUIV` = as.numeric(`ORANGES - PRICE RECEIVED, MEASURED IN $ / BOX, PHD EQUIV`),
+                       `TANGERINES - PRICE RECEIVED, MEASURED IN $ / BOX, PHD EQUIV` = as.numeric(`TANGERINES - PRICE RECEIVED, MEASURED IN $ / BOX, PHD EQUIV`))
+
+# All columns are now treated as numerical values.
+
+sapply(base_dataNUM, class)
+
+# This graphic illustrates the general trend of the production of coffee as measured in $/LB
+ggplot(base_dataNUM, mapping = aes(x = Year, y = `COFFEE - PRICE RECEIVED, MEASURED IN $ / LB`)) + 
+        geom_point(aes(color = "black"), size = 1.5) +
+        geom_smooth(aes(color = "blue"), se = FALSE) +
+        geom_smooth(method = "lm", aes(color = "orange"), alpha = 0.75, se = FALSE) + 
+        labs(y= "Price Recieved for Coffee\nMeasured in $/LB\n", title = "\nPrice Recieved for Coffee by Year\n1967-2017\n", color = "") +
+        theme(plot.title = element_text(hjust = 0.5)) + 
+        scale_x_continuous(breaks = seq(1968, 2016, by = 4)) +
+        scale_y_continuous(breaks = seq(0, 4500, by = 500)) +
+        scale_color_manual(labels = c("Point Values", "Smooth Trend", "General Trend"), values = c("black", "blue", "orange"))
+```
+
+# Modifying/Preparing the Data
+```{r}
+#view(base_data)
+
+# Before attempting to fit models to this data, it should be paritioned into test and training sets as per standard practice.
+# In this project, the production of coffee as measured by the price recieved measured in $/LB will be analyzed.
+# The seed is set for reproducibility.
+
+set.seed(12)
+testIndex <- createDataPartition(base_dataNUM$`COFFEE - PRICE RECEIVED, MEASURED IN $ / LB`, p = 0.20, list = FALSE)
+test <- base_dataNUM[testIndex,]
+train <- base_dataNUM[-testIndex,]
+
+# Observing the correlation betweent the different variables can be a helpful tool to drive analysis and aid in building models to fit the data.
+
+Correlations <- train %>% select_if(is.numeric) %>%
+                        na.omit() %>%
+                        cor() %>%
+                        data.frame %>%
+                        dplyr::select(`COFFEE...PRICE.RECEIVED..MEASURED.IN.....LB`)%>% 
+                        rownames_to_column() %>%
+                        arrange(desc(`COFFEE...PRICE.RECEIVED..MEASURED.IN.....LB`))
+
+# Not surprisingly, `COFFEE...PRICE.RECEIVED..MEASURED.IN.....LB` is 100% correlated with itself.
+# Year is also very highly correlated with `COFFEE...PRICE.RECEIVED..MEASURED.IN.....LB`, but this can likely partially be attributed to inflation and the increasing poopularity of coffee consumption in the United States.
+
+#view(Correlations)
+Correlations
+
+
+# This graphic illustrates the overall trend in the data for apples over the years (similar to the previous graphic of coffee)
+ggplot(base_dataNUM, mapping = aes(x = Year, y = `APPLES - PRICE RECEIVED, MEASURED IN $ / LB`)) + 
+        geom_point(aes(color = "gray"), size = 2) +
+        geom_smooth(aes(color = "orange"), alpha = 0.5, se = FALSE) +
+        labs(y= "Price Recieved for Apples\nMeasured in $/LB\n", title = "\nPrice Recieved for Apples by Year\n1967-2017\n", color = "") +
+        theme(plot.title = element_text(hjust = 0.5)) + 
+        scale_x_continuous(breaks = seq(1968, 2016, by = 4)) +
+        scale_color_manual(labels = c("Point Values", "Smooth Trend"), values = c("gray", "orange"))
+
+# The following graphics observe the correlation between Coffee and other variables
+
+#In this graphic, we see a reasonable degree of correlation between coffee and apples as would be expected with a calculated correlation value of 0.755.
+ggplot(base_dataNUM, mapping = aes(x = `COFFEE - PRICE RECEIVED, MEASURED IN $ / LB`, y = `APPLES - PRICE RECEIVED, MEASURED IN $ / LB`)) + 
+        geom_point(aes(color = "gray"), size = 2) +
+        geom_smooth(aes(color="red"), alpha=0.5,se = FALSE) +
+        geom_smooth(method = "lm", aes(color = "orange"), alpha = 0.75, se = FALSE) +
+        labs(x= "Price Recieved for Coffee\nMeasured in $/LB\n", y = "Price Recieved for Apples\nMeasured in $/LB\n", title = "\nCorrelation Between Price Recieved for Coffee and Apples\n1967-2017\n", color = "") +
+        theme(plot.title = element_text(hjust = 0.5)) + 
+        scale_x_continuous(expand = c(0, 0), limits = c(0,4500)) + 
+        scale_y_continuous(expand = c(0, 0), limits = c(0,500)) +
+        scale_color_manual(labels = c("Correlation-Points", "Correlation-Trend-Smooth", "correlation-Trend-General"), values = c("gray", "red", "orange"))
+
+#In this graphic, we see very little correlation between coffee and oranges. This is also expected as oranges only has a calculated correlation value of 0.228.
+ggplot(base_dataNUM, mapping = aes(x = `COFFEE - PRICE RECEIVED, MEASURED IN $ / LB`, y = `ORANGES - PRICE RECEIVED, MEASURED IN $ / BOX, PHD EQUIV`)) + 
+        geom_point(aes(color = "gray"), size = 2) +
+        geom_smooth(aes(color= "orange"), se = FALSE) +
+        labs(x= "Price Recieved for Coffee\nMeasured in $/LB\n", y = "Price Recieved for Oranges\nMeasured in $/Box\n", title = "\nCorrelation Between Price Recieved for Coffee and Oranges\n1967-2017\n", color = "") +
+        theme(plot.title = element_text(hjust = 0.5)) + 
+        scale_x_continuous(expand = c(0, 0), limits = c(0,4500)) + 
+        scale_y_continuous(expand = c(0, 0), limits = c(0,4500)) + 
+        scale_color_manual(labels = c("Point Values", "Smooth Trend"), values = c("black", "orange"))
+
+```
+
+# Correlations - text 
+1	COFFEE - PRICE RECEIVED, MEASURED IN $ / LB	1.0000000
+2	Year	0.8228098
+3	APPLES - PRICE RECEIVED, MEASURED IN $ / LB	0.7552155
+4	CRANBERRIES - PRICE RECEIVED, MEASURED IN $ / BARREL	0.7015985
+5	GRAPEFRUIT - PRICE RECEIVED, MEASURED IN $ / BOX, PHD EQUIV	0.4901789
+6	CHERRIES, TART - PRICE RECEIVED, MEASURED IN $ / LB	0.3767961
+7	APRICOTS - PRICE RECEIVED, MEASURED IN $ / TON	0.2577470
+8	ORANGES - PRICE RECEIVED, MEASURED IN $ / BOX, PHD EQUIV	0.2284909
+9	LEMONS - PRICE RECEIVED, MEASURED IN $ / BOX, PHD EQUIV	-0.3402898
+10	TANGERINES - PRICE RECEIVED, MEASURED IN $ / BOX, PHD EQUIV	-0.4152765
+11	CHERRIES, SWEET - PRICE RECEIVED, MEASURED IN $ / TON -0.4425704
+
+
+
+# Models
+
+  In the following sections, different models are built and their accuracy measured on the test set by the R-squared metric (attempting to maximize it).
+  
+## KNN Regression
+### KNN Regression - Cross Validation Models
+```{r}
+# The following models are all built using cross validation with 5 folds.
+# The first model includes all other variables as predictors in order to predict coffee price/lb recieved.
+# The following models include combinations of the most highly correlated variables (+ and -) excluding the Year variable.
+# The 'trim1' model includes the most highly correlated variable (excluding year): 'Apples...LB'
+# The 'trim2' model includes the 2 most highly correlated variables (excluding year): 'Apples...LB' and 'Cranberries...Barrel'.
+# The above naming scheme continues through 'trim5' (inclusive), including the 5 most highly correlated variables
+# This naming scheme reflecting the inclusion of different variables in this manner is followed throughout the rest of this project.
+
+set.seed(12)
+control1 <- trainControl(method = "cv", number = 5)
+KNNmodelCV <- train(`COFFEE - PRICE RECEIVED, MEASURED IN $ / LB` ~ ., 
+                   data = train,
+                   method = "knn",
+                   tuneGrid = data.frame(k=seq(1,30,2)),
+                   trControl = control1,
+                   preProcess = c("center","scale"))
+
+ggplot(KNNmodelCV, highlight = TRUE)
+PredictKNNModelCV<- predict(KNNmodelCV, newdata = test)
+postResample(PredictKNNModelCV,test$`COFFEE - PRICE RECEIVED, MEASURED IN $ / LB`)
+# KNNmodelCV  ==>  R-squared = 0.4876804
+
+set.seed(12)
+KNNmodelCVtrim1 <- train(`COFFEE - PRICE RECEIVED, MEASURED IN $ / LB` ~ `APPLES - PRICE RECEIVED, MEASURED IN $ / LB`, 
+                   data = train,
+                   method = "knn",
+                   tuneGrid = data.frame(k=seq(1,30,4)),
+                   trControl = control1,
+                   preProcess = c("center","scale"))
+
+ggplot(KNNmodelCVtrim1, highlight = TRUE)
+PredictKNNModelCVtrim1<- predict(KNNmodelCVtrim1, newdata = test)
+postResample(PredictKNNModelCVtrim1,test$`COFFEE - PRICE RECEIVED, MEASURED IN $ / LB`)
+#KNNmodelCVtrim1 ==> R-squared = 0.4198035
+
+set.seed(12)
+KNNmodelCVtrim2 <- train(`COFFEE - PRICE RECEIVED, MEASURED IN $ / LB` ~ `APPLES - PRICE RECEIVED, MEASURED IN $ / LB` + `CRANBERRIES - PRICE RECEIVED, MEASURED IN $ / BARREL`, 
+                   data = train,
+                   method = "knn",
+                   tuneGrid = data.frame(k=seq(1,30,4)),
+                   trControl = control1,
+                   preProcess = c("center","scale"))
+
+ggplot(KNNmodelCVtrim2, highlight = TRUE)
+PredictKNNModelCVtrim2 <- predict(KNNmodelCVtrim2, newdata = test)
+postResample(PredictKNNModelCVtrim2,test$`COFFEE - PRICE RECEIVED, MEASURED IN $ / LB`)
+#KNNmodelCVtrim ==> R-squared = 0.4323774 
+
+set.seed(12)
+KNNmodelCVtrim3 <- train(`COFFEE - PRICE RECEIVED, MEASURED IN $ / LB` ~ `APPLES - PRICE RECEIVED, MEASURED IN $ / LB` + `CRANBERRIES - PRICE RECEIVED, MEASURED IN $ / BARREL` + `GRAPEFRUIT - PRICE RECEIVED, MEASURED IN $ / BOX, PHD EQUIV`, 
+                   data = train,
+                   method = "knn",
+                   tuneGrid = data.frame(k=seq(1,30,4)),
+                   trControl = control1,
+                   preProcess = c("center","scale"))
+
+ggplot(KNNmodelCVtrim3, highlight = TRUE)
+PredictKNNModelCVtrim3 <- predict(KNNmodelCVtrim3, newdata = test)
+postResample(PredictKNNModelCVtrim3,test$`COFFEE - PRICE RECEIVED, MEASURED IN $ / LB`)
+#KNNmodelCVtrim ==> R-squared = 0.6497123
+
+set.seed(12)
+KNNmodelCVtrim4 <- train(`COFFEE - PRICE RECEIVED, MEASURED IN $ / LB` ~ `APPLES - PRICE RECEIVED, MEASURED IN $ / LB` + `CRANBERRIES - PRICE RECEIVED, MEASURED IN $ / BARREL` + `GRAPEFRUIT - PRICE RECEIVED, MEASURED IN $ / BOX, PHD EQUIV` + `CHERRIES, SWEET - PRICE RECEIVED, MEASURED IN $ / TON`, 
+                   data = train,
+                   method = "knn",
+                   tuneGrid = data.frame(k=seq(1,30,4)),
+                   trControl = control1,
+                   preProcess = c("center","scale"))
+
+ggplot(KNNmodelCVtrim4, highlight = TRUE)
+PredictKNNModelCVtrim4 <- predict(KNNmodelCVtrim4, newdata = test)
+postResample(PredictKNNModelCVtrim4,test$`COFFEE - PRICE RECEIVED, MEASURED IN $ / LB`)
+#KNNmodelCVtrim ==> R-squared = 0.6729001
+
+set.seed(12)
+KNNmodelCVtrim5 <- train(`COFFEE - PRICE RECEIVED, MEASURED IN $ / LB` ~ `APPLES - PRICE RECEIVED, MEASURED IN $ / LB` + `CRANBERRIES - PRICE RECEIVED, MEASURED IN $ / BARREL` + `GRAPEFRUIT - PRICE RECEIVED, MEASURED IN $ / BOX, PHD EQUIV` +	`TANGERINES - PRICE RECEIVED, MEASURED IN $ / BOX, PHD EQUIV` + `CHERRIES, SWEET - PRICE RECEIVED, MEASURED IN $ / TON`, 
+                   data = train,
+                   method = "knn",
+                   tuneGrid = data.frame(k=seq(1,30,4)),
+                   trControl = control1,
+                   preProcess = c("center","scale"))
+
+ggplot(KNNmodelCVtrim5, highlight = TRUE)
+PredictKNNModelCVtrim5 <- predict(KNNmodelCVtrim5, newdata = test)
+postResample(PredictKNNModelCVtrim5,test$`COFFEE - PRICE RECEIVED, MEASURED IN $ / LB`)
+# KNNmodelCVtrim1 ==> R-squared = 0.6573517
+
+```
+
+
+### KNN Regression - Cross Validation Models - Graphics
+```{r}
+# As KNNmodelCVtrim4 was the best model in this family of models - this model will be visualized
+#View(KNNmodelCVtrim4)
+#residualPlot(KNNmodelCVtrim4)
+residuals(KNNmodelCVtrim4)
+
+x  <- seq(1, 12, 1)
+y1 <- PredictKNNModelCVtrim5
+y2 <- test$`COFFEE - PRICE RECEIVED, MEASURED IN $ / LB`
+df <- data.frame(x,y1,y2)
+
+# This graphic shows the performance of the KNNModelCVtrim4 in comparison with the real values on the test set.
+ggplot(df, aes(x)) +                    
+  geom_point(aes(y=y1, color="red")) + 
+  geom_point(aes(y=y2, color="black")) +
+  geom_smooth(aes(y=y1, color="red"),alpha = 0.5, se = FALSE) + 
+  geom_smooth(aes(y=y2, color="black"),alpha = 0.5, se = FALSE) +
+  labs(x = "",y ="Price Recived ($/LB)\n", title ="Predicted and Real Vaues on Test Set\nPrediction Model = KNNmodelCVtrim4\n", color = "") +
+  theme(plot.title = element_text(hjust = 0.5)) + 
+  #scale_x_continuous(seq(0, 12, 2)) + 
+  #scale_y_continuous(seq(0,4500,500)) + 
+  scale_color_manual(labels = c("Predicted", "Real"), values = c("red", "black"))
+```
+
+### KNN Regression - LOOCV
+```{r}
+# The following models are all built using Leave-One-Out Cross Validation.
+# The first model includes all other variables as predictors in order to predict coffee price/lb recieved.
+# The following models include combinations of the most highly correlated variables (+ and -) excluding the Year variable.
+# The scheme detailed above of including 1-5 of the most highly correlated variables is continued here and notated as detailed above.
+
+set.seed(12)
+control2 <- trainControl(method = "LOOCV")
+KNNmodelLOOCV <- train(`COFFEE - PRICE RECEIVED, MEASURED IN $ / LB` ~ ., 
+                   data = train,
+                   method = "knn",
+                   tuneGrid = data.frame(k=seq(1,30,2)),
+                   trControl = control2,
+                   preProcess = c("center","scale"))
+
+ggplot(KNNmodelLOOCV, highlight = TRUE)
+PredictKNNModelLOOCV<- predict(KNNmodelLOOCV, newdata = test)
+postResample(PredictKNNModelLOOCV,test$`COFFEE - PRICE RECEIVED, MEASURED IN $ / LB`)
+# KNNmodelLOOCV ==> R-squared = 0.4876804
+
+set.seed(12)
+KNNmodelLOOCVtrim1 <- train(`COFFEE - PRICE RECEIVED, MEASURED IN $ / LB` ~ `APPLES - PRICE RECEIVED, MEASURED IN $ / LB`, 
+                   data = train,
+                   method = "knn",
+                   tuneGrid = data.frame(k=seq(1,30,4)),
+                   trControl = control2,
+                   preProcess = c("center","scale"))
+
+ggplot(KNNmodelLOOCVtrim1, highlight = TRUE)
+PredictKNNModelLOOCVtrim1 <- predict(KNNmodelLOOCVtrim1, newdata = test)
+postResample(PredictKNNModelLOOCVtrim1,test$`COFFEE - PRICE RECEIVED, MEASURED IN $ / LB`)
+#KNNmodelLOOCVtrim1 ==> R-squared = 0.4368177
+
+set.seed(12)
+KNNmodelLOOCVtrim2 <- train(`COFFEE - PRICE RECEIVED, MEASURED IN $ / LB` ~ `APPLES - PRICE RECEIVED, MEASURED IN $ / LB` + `CRANBERRIES - PRICE RECEIVED, MEASURED IN $ / BARREL`, 
+                   data = train,
+                   method = "knn",
+                   tuneGrid = data.frame(k=seq(1,30,4)),
+                   trControl = control2,
+                   preProcess = c("center","scale"))
+
+ggplot(KNNmodelLOOCVtrim2, highlight = TRUE)
+PredictKNNModelLOOCVtrim2 <- predict(KNNmodelLOOCVtrim2, newdata = test)
+postResample(PredictKNNModelLOOCVtrim2,test$`COFFEE - PRICE RECEIVED, MEASURED IN $ / LB`)
+#KNNmodelLOOCVtrim2 ==> R-squared = 0.4323774 
+
+set.seed(12)
+KNNmodelLOOCVtrim3 <- train(`COFFEE - PRICE RECEIVED, MEASURED IN $ / LB` ~ `APPLES - PRICE RECEIVED, MEASURED IN $ / LB` + `CRANBERRIES - PRICE RECEIVED, MEASURED IN $ / BARREL` + `GRAPEFRUIT - PRICE RECEIVED, MEASURED IN $ / BOX, PHD EQUIV`, 
+                   data = train,
+                   method = "knn",
+                   tuneGrid = data.frame(k=seq(1,30,4)),
+                   trControl = control2,
+                   preProcess = c("center","scale"))
+
+ggplot(KNNmodelLOOCVtrim3, highlight = TRUE)
+PredictKNNModelLOOCVtrim3 <- predict(KNNmodelLOOCVtrim3, newdata = test)
+postResample(PredictKNNModelLOOCVtrim3,test$`COFFEE - PRICE RECEIVED, MEASURED IN $ / LB`)
+#KNNmodelLOOCVtrim3 ==> R-squared = 0.6497123
+
+set.seed(12)
+KNNmodelLOOCVtrim4 <- train(`COFFEE - PRICE RECEIVED, MEASURED IN $ / LB` ~ `APPLES - PRICE RECEIVED, MEASURED IN $ / LB` + `CRANBERRIES - PRICE RECEIVED, MEASURED IN $ / BARREL` + `GRAPEFRUIT - PRICE RECEIVED, MEASURED IN $ / BOX, PHD EQUIV` + `CHERRIES, SWEET - PRICE RECEIVED, MEASURED IN $ / TON`, 
+                   data = train,
+                   method = "knn",
+                   tuneGrid = data.frame(k=seq(1,30,4)),
+                   trControl = control2,
+                   preProcess = c("center","scale"))
+
+ggplot(KNNmodelLOOCVtrim4, highlight = TRUE)
+PredictKNNModelLOOCVtrim4 <- predict(KNNmodelLOOCVtrim4, newdata = test)
+postResample(PredictKNNModelLOOCVtrim4,test$`COFFEE - PRICE RECEIVED, MEASURED IN $ / LB`)
+#KNNmodelLOOCVtrim4 ==> R-squared = 0.6729001
+
+set.seed(12)
+KNNmodelLOOCVtrim5 <- train(`COFFEE - PRICE RECEIVED, MEASURED IN $ / LB` ~ `APPLES - PRICE RECEIVED, MEASURED IN $ / LB` + `CRANBERRIES - PRICE RECEIVED, MEASURED IN $ / BARREL` + `GRAPEFRUIT - PRICE RECEIVED, MEASURED IN $ / BOX, PHD EQUIV` +	`TANGERINES - PRICE RECEIVED, MEASURED IN $ / BOX, PHD EQUIV` + `CHERRIES, SWEET - PRICE RECEIVED, MEASURED IN $ / TON`, 
+                   data = train,
+                   method = "knn",
+                   tuneGrid = data.frame(k=seq(1,30,4)),
+                   trControl = control2,
+                   preProcess = c("center","scale"))
+
+ggplot(KNNmodelLOOCVtrim5, highlight = TRUE)
+PredictKNNModelLOOCVtrim5 <- predict(KNNmodelLOOCVtrim5, newdata = test)
+postResample(PredictKNNModelLOOCVtrim5,test$`COFFEE - PRICE RECEIVED, MEASURED IN $ / LB`)
+# KNNModelLOOCVtrim5 ==> R-squared = 0.6573517
+```
+
+### KNN Regression - LOOCV - Graphics
+```{r}
+# As KNNModelLOOCVtrim4 was the best model in this family of models - this model will be visualized
+#View(KNNmodelLOOCVtrim4)
+x  <- seq(1, 12, 1)
+y1 <- PredictKNNModelLOOCVtrim4
+y2 <- test$`COFFEE - PRICE RECEIVED, MEASURED IN $ / LB`
+df <- data.frame(x,y1,y2)
+
+# This graphic shows the performance of the KNNModelCVtrim4 in comparison with the real values on the test set.
+ggplot(df, aes(x)) +                    
+  geom_point(aes(y=y1, color="red")) + 
+  geom_point(aes(y=y2, color="black")) +
+  geom_smooth(aes(y=y1, color="red"),alpha = 0.5, se = FALSE) + 
+  geom_smooth(aes(y=y2, color="black"),alpha = 0.5, se = FALSE) +
+  labs(x = "",y ="Price Recived ($/LB)\n", title ="Predicted and Real Vaues on Test Set\nPrediction Model = KNNModelLOOCVtrim4\n", color = "") +
+  theme(plot.title = element_text(hjust = 0.5)) + 
+  #scale_x_continuous(seq(0, 12, 2)) + 
+  #scale_y_continuous(seq(0,4500,500)) + 
+  scale_color_manual(labels = c("Predicted", "Real"), values = c("red", "black"))
+
+```
+
+## Linear Regression
+```{r}
+# With linear regression, it is important to check if there are any near-zero-variance (NSV) predictors that may influence the data.
+
+NZV <- nearZeroVar(train, saveMetrics = T)
+NZV[NZV$nzv,]
+
+# Since there are no NSV predictors, no extra action needs to be taken.
+
+# The first model includes all other variables as predictors in order to predict coffee price/lb recieved.
+# The following models include combinations of the most highly correlated variables (+ and -) excluding the `Year` variable.
+# The scheme detailed above of including 1-5 of the most highly correlated variables is continued here and notated as detailed above.
+
+set.seed(12)
+LINEARmodel <- lm(`COFFEE - PRICE RECEIVED, MEASURED IN $ / LB` ~ ., data = train)
+PredictLINEARmodel <- predict(LINEARmodel, newdata = test)
+postResample(pred = PredictLINEARmodel, obs = test$`COFFEE - PRICE RECEIVED, MEASURED IN $ / LB`)
+#summary(LINEARmodel)
+# LINEARmodel ==> Multiple R-squared = 0.8079,	Adjusted R-squared:  0.7393
+# LINEARmodel ==> R-Squared = 0.5070193 (test set)
+
+set.seed(12)
+LINEARmodeltrim1 <- lm(`COFFEE - PRICE RECEIVED, MEASURED IN $ / LB` ~ `APPLES - PRICE RECEIVED, MEASURED IN $ / LB`, data = train)
+PredictLINEARmodeltrim1 <- predict(LINEARmodeltrim1, newdata = test)
+postResample(pred = PredictLINEARmodeltrim1, obs = test$`COFFEE - PRICE RECEIVED, MEASURED IN $ / LB`)
+#summary(LINEARmodeltrim1)
+# LINEARmodeltrim1 ==> Multiple R-squared:  0.5704,	Adjusted R-squared:  0.5587 
+# LINEARmodeltrim1 ==> R-Squared =  0.3039402 (test set)
+
+set.seed(12)
+LINEARmodeltrim2 <- lm(`COFFEE - PRICE RECEIVED, MEASURED IN $ / LB` ~ `APPLES - PRICE RECEIVED, MEASURED IN $ / LB` + `CRANBERRIES - PRICE RECEIVED, MEASURED IN $ / BARREL`, data = train)
+PredictLINEARmodeltrim2 <- predict(LINEARmodeltrim2, newdata = test)
+postResample(pred = PredictLINEARmodeltrim2, obs = test$`COFFEE - PRICE RECEIVED, MEASURED IN $ / LB`)
+#summary(LINEARmodeltrim2)
+# LINEARmodeltrim2 ==> R-squared = Multiple R-squared:  0.7039,	Adjusted R-squared:  0.6875 
+# LINEARmodeltrim2 ==> R-Squared = 0.4227983 (test set)
+
+set.seed(12)
+LINEARmodeltrim3 <- lm(`COFFEE - PRICE RECEIVED, MEASURED IN $ / LB` ~ `APPLES - PRICE RECEIVED, MEASURED IN $ / LB` + `CRANBERRIES - PRICE RECEIVED, MEASURED IN $ / BARREL` + `GRAPEFRUIT - PRICE RECEIVED, MEASURED IN $ / BOX, PHD EQUIV`, data = train)
+PredictLINEARmodeltrim3 <- predict(LINEARmodeltrim3, newdata = test)
+postResample(pred = PredictLINEARmodeltrim3, obs = test$`COFFEE - PRICE RECEIVED, MEASURED IN $ / LB`)
+#summary(LINEARmodeltrim3)
+# LINEARmodeltrim3 ==> R-squared = Multiple R-squared:  0.7275,	Adjusted R-squared:  0.7041 
+# LINEARmodeltrim3 ==> R-Squared = 0.5386577 (test set)
+
+set.seed(12)
+LINEARmodeltrim4 <- lm(`COFFEE - PRICE RECEIVED, MEASURED IN $ / LB` ~ `APPLES - PRICE RECEIVED, MEASURED IN $ / LB` + `CRANBERRIES - PRICE RECEIVED, MEASURED IN $ / BARREL` + `GRAPEFRUIT - PRICE RECEIVED, MEASURED IN $ / BOX, PHD EQUIV` + `CHERRIES, SWEET - PRICE RECEIVED, MEASURED IN $ / TON`, data = train)
+PredictLINEARmodeltrim4 <- predict(LINEARmodeltrim4, newdata = test)
+postResample(pred = PredictLINEARmodeltrim4, obs = test$`COFFEE - PRICE RECEIVED, MEASURED IN $ / LB`)
+#summary(LINEARmodeltrim4)
+# LINEARmodeltrim4 ==> R-squared = Multiple R-squared:  0.7631,	Adjusted R-squared:  0.7353 
+# LINEARmodeltrim4 ==> R-Squared =  0.5920192 (test set)
+
+set.seed(12)
+LINEARmodeltrim5 <- lm(`COFFEE - PRICE RECEIVED, MEASURED IN $ / LB` ~ `APPLES - PRICE RECEIVED, MEASURED IN $ / LB` + `CRANBERRIES - PRICE RECEIVED, MEASURED IN $ / BARREL` + `GRAPEFRUIT - PRICE RECEIVED, MEASURED IN $ / BOX, PHD EQUIV` + `CHERRIES, SWEET - PRICE RECEIVED, MEASURED IN $ / TON` + `TANGERINES - PRICE RECEIVED, MEASURED IN $ / BOX, PHD EQUIV`, data = train)
+PredictLINEARmodeltrim5 <- predict(LINEARmodeltrim5, newdata = test)
+postResample(pred = PredictLINEARmodeltrim5, obs = test$`COFFEE - PRICE RECEIVED, MEASURED IN $ / LB`)
+#summary(LINEARmodeltrim5)
+# LINEARmodeltrim5 ==> R-squared = Multiple R-squared:  0.7634,	Adjusted R-squared:  0.7275 
+# LINEARmodeltrim5 ==> R-Squared = 0.5964299 (test set)
+
+
+# When building linear models, an additional aspect to consider is the possibility of collinearity between the variables. If a high degree of collinearity is present, this can  be problematic for fitting the model because these variables should be relatively independent of one another.
+
+# To check for collinearity, we calculate the variance inflation factors of each variable in the models using the vif() function from the {car} package.
+
+# In the first model, the `Apples...LB` and the `Year` variables have high variance inflation factors. As such, it would be unwise to use this model.
+vif(LINEARmodel)
+
+# The variance inflation factor cannot be calculted for models containing fewer than 2 predictors.
+#vif(LINEARmodeltrim1)
+
+# This model produces fairly low variance inflation factors ( < 3-5). As such this would likely be a reliable model to consider.
+vif(LINEARmodeltrim2)
+
+# This model produces fairly low variance inflation factors ( < 3-5). As such this would likely be a reliable model to consider.
+vif(LINEARmodeltrim3)
+
+# This model produces fairly low variance inflation factors ( < 3-5). As such this would likely be a reliable model to consider.
+vif(LINEARmodeltrim4)
+
+# This model produces fairly low variance inflation factors ( < 3-5). As such this would likely be a reliable model to consider.
+vif(LINEARmodeltrim5)
+
+# Returning to the high variance inflation factors of the first model, we attempt a couple models removing these highly correlated variables (`Apples...LB` and `Year`).
+
+set.seed(12)
+LINEARmodel1 <- lm(`COFFEE - PRICE RECEIVED, MEASURED IN $ / LB` ~ . -Year , data = train)
+PredictLINEARmodel1 <- predict(LINEARmodel1, newdata = test)
+postResample(pred = PredictLINEARmodel1, obs = test$`COFFEE - PRICE RECEIVED, MEASURED IN $ / LB`)
+#summary(LINEARmodel1)
+# LINEARmodel1 ==> Multiple R-squared:  0.8067,	Adjusted R-squared:  0.7467 
+# LINEARmodel1 ==> R-Squared = 0.4695323 (test set)
+
+set.seed(12)
+LINEARmodel2 <- lm(`COFFEE - PRICE RECEIVED, MEASURED IN $ / LB` ~ . -Year -`APPLES - PRICE RECEIVED, MEASURED IN $ / LB`, data = train)
+PredictLINEARmodel2 <- predict(LINEARmodel2, newdata = test)
+postResample(pred = PredictLINEARmodel2, obs = test$`COFFEE - PRICE RECEIVED, MEASURED IN $ / LB`)
+#summary(LINEARmodel2)
+# LINEARmodel2 ==> Multiple R-squared:  0.728,	Adjusted R-squared:  0.6555 
+# LINEARmodel2 ==> R-Squared = 0.5749966 (test set)
+
+# The first model produces a variance inflation factor of 4 for `Apples...LB`, but every other variable has a variance inflation factor within the safe range ( < 3-5). This could possibly still be a reliable model to consider as the variance inflation factor for `Apples...LB` although not as low as the others is still not extremely high.
+vif(LINEARmodel1)
+
+# The second model produces variance inflation factors less than 3 for every variable in the model. As such, this would likely be a reliable model to consider.
+vif(LINEARmodel2)
+
+```
+
+
+## Linear Regression - Visualizations
+```{r}
+
+# As LINEARmodeltrim5 was the best model in this family of models - this model will be visualized
+
+# This visualization shows that the residuals are relatively normally distributed - meaning that there should be no skew in the data that we could easily handle using BoxCox or some other similar transformation (at least to make a significant enough difference)
+ggplot() + geom_histogram(mapping = aes(x=LINEARmodeltrim5$residuals)) +
+        labs(x = "\nResidual Values", y =  "Count / Frequency\n", title = "Residuals of \"LINEARmodeltrim5\"\n") + 
+        theme(plot.title = element_text(hjust = 0.5)) 
+
+
+# This graphic shows the fitted values of LINEARmodeltrim5 on the training set against the real values.
+ggplot(train) +
+  geom_point(mapping = aes(x = Year, y = `COFFEE - PRICE RECEIVED, MEASURED IN $ / LB`, color = "black")) +
+  geom_line(mapping = aes(x = Year, y = LINEARmodeltrim5$fitted.values, color = "red")) + 
+  labs(x = "\nYear" ,
+       y = "Price Recieved ($/LB)\n" ,
+       title = "LINEARmodeltrim5 and Real Values on training set\n",
+       color = "") + 
+  scale_color_manual(labels = c("Real Values",  "Predicted Values"), values = c("black", "red")) +
+  theme_dark() +
+  theme(plot.title = element_text(hjust = 0.5))
+
+
+# This graphic shows the fitted values of LINEARmodeltrim5 on the test set against the real values.
+ggplot(test) +
+  geom_point(mapping = aes(x = Year, y = `COFFEE - PRICE RECEIVED, MEASURED IN $ / LB`, color = "black")) +
+  geom_line(mapping = aes(x = Year, y = PredictLINEARmodel2, color = "red")) +
+  labs(x = "\nYear" ,
+       y = "Price Recieved ($/LB)\n" ,
+       title = "LINEARmodeltrim5 and Real Values on test set\n",
+       color = "") + 
+  scale_color_manual(labels = c("Real Values",  "Predicted Values"), values = c("black", "red")) +
+  theme_dark() +
+  theme(plot.title = element_text(hjust = 0.5))
+
+#view(base_dataNUM)
+
+ggplot() +
+    geom_point(mapping = aes(x = base_dataNUM$Year, y = base_dataNUM$`COFFEE - PRICE RECEIVED, MEASURED IN $ / LB`, color = "black")) + 
+    geom_point(mapping = aes(x = test$Year,y = PredictLINEARmodel2, color = "blue")) +
+    geom_line(mapping = aes(x = test$Year,y = PredictLINEARmodel2, color = "blue"),alpha= 0.5) +
+    geom_line(mapping = aes(x = base_dataNUM$Year, y = base_dataNUM$`COFFEE - PRICE RECEIVED, MEASURED IN $ / LB`, color = "black"), alpha = 0.5) + 
+    scale_color_manual(labels = c("Real Values", "Predicted"), values = c("black", "blue")) +
+    scale_x_continuous(breaks = seq(1968, 2016, by = 4)) +
+    scale_y_continuous(breaks = seq(0, 4500, by = 500)) +
+    labs(x = "\nYear",
+         y= "Price Recieved ($/LB)",
+         color = "",
+         title = "Price Recieved for Coffee ($/LB) 1967-2017 \n Predictive Model = LINEARmodeltrim5\n") +
+    theme(plot.title = element_text(hjust = 0.5))
+
+```
+
+## Decision Trees
+```{r}
+# The first model includes all other variables as predictors in order to predict coffee price/lb recieved.
+# The following models include combinations of the most highly correlated variables (+ and -) excluding the `Year` variable.
+# The scheme detailed above of including 1-5 of the most highly correlated variables is continued here and notated as detailed above.
+
+# When creating decision tree models, the data must be in a dataframe. As such, the datasets are converted to dataframes to allow for analyses with these models.
+
+df_base <- data.frame(base_dataNUM)
+df_train <- data.frame(train)
+df_test <- data.frame(test)
+
+# It is worthwhile to not that in the conversion to a datafame, spaces and special characters were replaced with periods. As such, the column names are slightly different than previously referenced in above models.
+# You can observe the changes with the following function: 
+colnames(df_train)
+
+set.seed(12)
+TREEModel <- tree(`COFFEE...PRICE.RECEIVED..MEASURED.IN.....LB` ~ ., df_train)
+summary(TREEModel)
+predTREEModel <- predict(TREEModel, df_test, type = "vector")
+postResample(pred = predTREEModel, obs = df_test$`COFFEE...PRICE.RECEIVED..MEASURED.IN.....LB`)
+# TREEModel  ==>  R-Squared = 0.7201364
+
+set.seed(12)
+TREEModeltrim1 <- tree(`COFFEE...PRICE.RECEIVED..MEASURED.IN.....LB` ~
+                        `APPLES...PRICE.RECEIVED..MEASURED.IN.....LB`, df_train)
+summary(TREEModeltrim1)
+predTREEModeltrim1 <- predict(TREEModeltrim1, df_test, type = "vector")
+postResample(pred = predTREEModeltrim1, obs = df_test$`COFFEE...PRICE.RECEIVED..MEASURED.IN.....LB`)
+# TREEModeltrim1  ==>  R-Squared = 0.4035512
+
+set.seed(12)
+TREEModeltrim2 <- tree(`COFFEE...PRICE.RECEIVED..MEASURED.IN.....LB` ~
+                        `APPLES...PRICE.RECEIVED..MEASURED.IN.....LB` +
+                        `CRANBERRIES...PRICE.RECEIVED..MEASURED.IN.....BARREL`, df_train)
+summary(TREEModeltrim2)
+predTREEModeltrim2 <- predict(TREEModeltrim2, df_test, type = "vector")
+postResample(pred = predTREEModeltrim2, obs = df_test$`COFFEE...PRICE.RECEIVED..MEASURED.IN.....LB`)
+# TREEModeltrim2  ==>  R-Squared = 0.6582862
+
+set.seed(12)
+TREEModeltrim3 <- tree(`COFFEE...PRICE.RECEIVED..MEASURED.IN.....LB` ~
+                        `APPLES...PRICE.RECEIVED..MEASURED.IN.....LB` +
+                        `CRANBERRIES...PRICE.RECEIVED..MEASURED.IN.....BARREL` +
+                        `GRAPEFRUIT...PRICE.RECEIVED..MEASURED.IN.....BOX..PHD.EQUIV`, df_train)
+summary(TREEModeltrim3)
+predTREEModeltrim3 <- predict(TREEModeltrim3, df_test, type = "vector")
+postResample(pred = predTREEModeltrim3, obs = df_test$`COFFEE...PRICE.RECEIVED..MEASURED.IN.....LB`)
+# TREEModeltrim3  ==>  R-Squared = 0.6582862
+
+set.seed(12)
+TREEModeltrim4 <- tree(`COFFEE...PRICE.RECEIVED..MEASURED.IN.....LB` ~
+                        `APPLES...PRICE.RECEIVED..MEASURED.IN.....LB` +
+                        `CRANBERRIES...PRICE.RECEIVED..MEASURED.IN.....BARREL` +
+                        `GRAPEFRUIT...PRICE.RECEIVED..MEASURED.IN.....BOX..PHD.EQUIV` +
+                        `CHERRIES..SWEET...PRICE.RECEIVED..MEASURED.IN.....TON`, df_train)
+summary(TREEModeltrim4)
+predTREEModeltrim4 <- predict(TREEModeltrim4, df_test, type = "vector")
+postResample(pred = predTREEModeltrim4, obs = df_test$`COFFEE...PRICE.RECEIVED..MEASURED.IN.....LB`)
+# TREEModeltrim4  ==>  R-Squared = 0.7493907
+
+set.seed(12)
+TREEModeltrim5 <- tree(`COFFEE...PRICE.RECEIVED..MEASURED.IN.....LB` ~
+                        `APPLES...PRICE.RECEIVED..MEASURED.IN.....LB` +
+                        `CRANBERRIES...PRICE.RECEIVED..MEASURED.IN.....BARREL` +
+                        `GRAPEFRUIT...PRICE.RECEIVED..MEASURED.IN.....BOX..PHD.EQUIV` +
+                        `CHERRIES..SWEET...PRICE.RECEIVED..MEASURED.IN.....TON` +
+                        `TANGERINES...PRICE.RECEIVED..MEASURED.IN.....BOX..PHD.EQUIV`, df_train)
+summary(TREEModeltrim5)
+predTREEModeltrim5 <- predict(TREEModeltrim5, df_test, type = "vector")
+postResample(pred = predTREEModeltrim5, obs = df_test$`COFFEE...PRICE.RECEIVED..MEASURED.IN.....LB`)
+# TREEModeltrim5  ==>  R-Squared = 0.7895449
+
+```
+
+## Decision Trees - Visualizations
+```{r}
+
+predTREEModeltrim5
+
+xTr  <- seq(1, 12, 1)
+y1Tr <- predTREEModeltrim5
+y2Tr <- test$`COFFEE - PRICE RECEIVED, MEASURED IN $ / LB`
+dfTr <- data.frame(xTr,y1Tr,y2Tr)
+
+# This graphic shows the performance of the predTREEModeltrim5 in comparison with the real values on the test set.
+ggplot(dfTr, aes(x = xTr)) +                    
+  geom_point(aes(y=y1Tr, color="red")) + 
+  geom_point(aes(y=y2Tr, color="black")) +
+  geom_smooth(aes(y=y1Tr, color="red"),alpha = 0.5, se = FALSE) + 
+  geom_smooth(aes(y=y2Tr, color="black"),alpha = 0.5, se = FALSE) +
+  labs(x = "",y ="Price Recived ($/LB)\n", title ="Predicted and Real Vaues on Test Set\nPrediction Model = TREEModeltrim5\n", color = "") +
+  theme(plot.title = element_text(hjust = 0.5)) + 
+  #scale_x_continuous(seq(0, 12, 2)) + 
+  #scale_y_continuous(seq(0,4500,500)) + 
+  scale_color_manual(labels = c("Predicted", "Real"), values = c("red", "black"))
+
+# This graphic shows the correlation between the real and the predicted values over the test set.
+ggplot(dfTr, mapping = aes(x = y2Tr, y = y1Tr)) + 
+        geom_point(aes(color = "black"), size = 2) +
+        geom_smooth(aes(color="red"), alpha=0.5,se = FALSE) +
+        geom_smooth(method="lm", aes(color="blue")) + 
+        labs(x= "Real Values of Test Set\n", y = "Predicted Values over Test Set\n", title = "\nCorrelation Between Real and Predicted Values over Test Set\n Predictive Model = TREEModeltrim5", color ="") +
+        theme(plot.title = element_text(hjust = 0.5)) +
+        scale_color_manual(labels = c("Correlation-Points", "Correlation-Trend", "General Trend"), values = c("black", "red", "blue")) 
+
+# This graphic shows the tree illustration of the model
+plot(TREEModeltrim5,  
+      main = "Regression Tree for Coffee Price Recieved")
+text(TREEModeltrim5, all = TRUE, cex = 0.25)
+
+```
+
+
+## Random Forests
+```{r}
+# The first model includes all other variables as predictors in order to predict coffee price/lb recieved.
+# The following models include combinations of the most highly correlated variables (+ and -) excluding the `Year` variable.
+# The scheme detailed above of including 1-5 of the most highly correlated variables is continued here and notated as detailed above.
+
+# As with decision tree models, data must be in a dataframe when creating random forest models. The same dataframe duplicates of the data created for use in the decision tree moodels are used here in the creation of the random forest models.
+
+set.seed(12)
+FORESTModel <- randomForest(`COFFEE...PRICE.RECEIVED..MEASURED.IN.....LB` ~ .,
+                            df_train, importance = TRUE)
+summary(FORESTModel)
+predFORESTModel <- predict(FORESTModel, df_test, type = "response")
+postResample(pred = predFORESTModel, obs = df_test$`COFFEE...PRICE.RECEIVED..MEASURED.IN.....LB`)
+# FORESTModel  ==>  R-Squared = 0.6151981
+
+set.seed(12)
+FORESTModeltrim1 <- randomForest(`COFFEE...PRICE.RECEIVED..MEASURED.IN.....LB` ~
+                        `APPLES...PRICE.RECEIVED..MEASURED.IN.....LB`,
+                        df_train, importance = TRUE)
+summary(FORESTModeltrim1)
+predFORESTModeltrim1 <- predict(FORESTModeltrim1, df_test, type = "response")
+postResample(pred = predFORESTModeltrim1, obs = df_test$`COFFEE...PRICE.RECEIVED..MEASURED.IN.....LB`)
+# FORESTModeltrim1  ==>  R-Squared = 0.4992751
+
+set.seed(12)
+FORESTModeltrim2 <- randomForest(`COFFEE...PRICE.RECEIVED..MEASURED.IN.....LB` ~
+                        `APPLES...PRICE.RECEIVED..MEASURED.IN.....LB` +
+                        `CRANBERRIES...PRICE.RECEIVED..MEASURED.IN.....BARREL`,
+                        df_train, importance = TRUE)
+summary(FORESTModeltrim2)
+predFORESTModeltrim2 <- predict(FORESTModeltrim2, df_test, type = "response")
+postResample(pred = predFORESTModeltrim2, obs = df_test$`COFFEE...PRICE.RECEIVED..MEASURED.IN.....LB`)
+# FORESTModeltrim2  ==>  R-Squared = 0.6109666
+
+set.seed(12)
+FORESTModeltrim3 <- randomForest(`COFFEE...PRICE.RECEIVED..MEASURED.IN.....LB` ~
+                        `APPLES...PRICE.RECEIVED..MEASURED.IN.....LB` +
+                        `CRANBERRIES...PRICE.RECEIVED..MEASURED.IN.....BARREL` +
+                        `GRAPEFRUIT...PRICE.RECEIVED..MEASURED.IN.....BOX..PHD.EQUIV`,
+                        df_train, importance = TRUE)
+summary(FORESTModeltrim3)
+predFORESTModeltrim3 <- predict(FORESTModeltrim3, df_test, type = "response")
+postResample(pred = predFORESTModeltrim3, obs = df_test$`COFFEE...PRICE.RECEIVED..MEASURED.IN.....LB`)
+# FORESTModeltrim3  ==>  R-Squared = 0.6883565
+
+set.seed(12)
+FORESTModeltrim4 <- randomForest(`COFFEE...PRICE.RECEIVED..MEASURED.IN.....LB` ~
+                        `APPLES...PRICE.RECEIVED..MEASURED.IN.....LB` +
+                        `CRANBERRIES...PRICE.RECEIVED..MEASURED.IN.....BARREL` +
+                        `GRAPEFRUIT...PRICE.RECEIVED..MEASURED.IN.....BOX..PHD.EQUIV` +
+                        `CHERRIES..SWEET...PRICE.RECEIVED..MEASURED.IN.....TON`,
+                        df_train, importance = TRUE)
+summary(FORESTModeltrim4)
+predFORESTModeltrim4 <- predict(FORESTModeltrim4, df_test, type = "response")
+postResample(pred = predFORESTModeltrim4, obs = df_test$`COFFEE...PRICE.RECEIVED..MEASURED.IN.....LB`)
+# FORESTModeltrim4  ==>  R-Squared = 0.7306798
+
+set.seed(12)
+FORESTModeltrim5 <- randomForest(`COFFEE...PRICE.RECEIVED..MEASURED.IN.....LB` ~
+                        `APPLES...PRICE.RECEIVED..MEASURED.IN.....LB` +
+                        `CRANBERRIES...PRICE.RECEIVED..MEASURED.IN.....BARREL` +
+                        `GRAPEFRUIT...PRICE.RECEIVED..MEASURED.IN.....BOX..PHD.EQUIV` +
+                        `CHERRIES..SWEET...PRICE.RECEIVED..MEASURED.IN.....TON` +
+                        `TANGERINES...PRICE.RECEIVED..MEASURED.IN.....BOX..PHD.EQUIV`,
+                        df_train, importance = TRUE)
+summary(FORESTModeltrim5)
+predFORESTModeltrim5 <- predict(FORESTModeltrim5, df_test, type = "response")
+postResample(pred = predFORESTModeltrim5, obs = df_test$`COFFEE...PRICE.RECEIVED..MEASURED.IN.....LB`)
+# FORESTModeltrim5  ==>  R-Squared = 0.5921903
+
+```
+
+## Random Forests - Visualizations
+```{r}
+
+FORESTModeltrim4$importance
+
+# In order to view this graphic, you must expand the plot output window.
+# This graphic illustrates the importance of certain variables
+varImpPlot(FORESTModeltrim4, pt.cex  = 10)
+
+# This graphic illustrates the decrease in error achieved with the increase in number of trees.
+plot(FORESTModeltrim4)
+
+# This simply provides the details of the forest model
+getTree(FORESTModeltrim4)
+
+xFr  <- seq(1, 12, 1)
+y1Fr <- predFORESTModeltrim4
+y2Fr <- test$`COFFEE - PRICE RECEIVED, MEASURED IN $ / LB`
+dfFr <- data.frame(xFr,y1Fr,y2Fr)
+
+# This graphic shows the performance of the FORESTModeltrim4 in comparison with the real values on the test set.
+ggplot(dfFr, aes(x = xFr)) +                    
+  geom_point(aes(y=y1Fr, color="red")) + 
+  geom_point(aes(y=y2Fr, color="black")) +
+  geom_smooth(aes(y=y1Fr, color="red"),alpha = 0.5, se = FALSE) + 
+  geom_smooth(aes(y=y2Fr, color="black"),alpha = 0.5, se = FALSE) +
+  labs(x = "",y ="Price Recived ($/LB)\n", title ="Predicted and Real Vaues on Test Set\nPrediction Model = FORESTModeltrim4\n", color = "") +
+  theme(plot.title = element_text(hjust = 0.5)) + 
+  scale_color_manual(labels = c("Predicted", "Real"), values = c("red", "black"))
+
+# This graphic shows the correlation between the real and the predicted values over the test set.
+ggplot(dfFr, mapping = aes(x = y2Fr, y = y1Fr)) + 
+        geom_point(aes(color = "black"), size = 2) +
+        geom_smooth(aes(color="red"), alpha=0.5,se = FALSE) +
+        geom_smooth(method="lm", aes(color="blue")) + 
+        labs(x= "Real Values of Test Set\n", y = "Predicted Values over Test Set\n", title = "\nCorrelation Between Real and Predicted Values over Test Set\n Predictive Model = FORESTModeltrim4", color ="") +
+        theme(plot.title = element_text(hjust = 0.5)) +
+        scale_color_manual(labels = c("Correlation-Points", "Correlation-Frend", "General Frend"), values = c("black", "red", "blue")) 
+
+```
+
+
+# Final Model
+```{r}
+# The best model, as measured by maximizing the R-Squared value, is the 'TREEModeltrim5' model
+
+TREEModeltrim5 <- tree(`COFFEE...PRICE.RECEIVED..MEASURED.IN.....LB` ~
+                        `APPLES...PRICE.RECEIVED..MEASURED.IN.....LB` +
+                        `CRANBERRIES...PRICE.RECEIVED..MEASURED.IN.....BARREL` +
+                        `GRAPEFRUIT...PRICE.RECEIVED..MEASURED.IN.....BOX..PHD.EQUIV` +
+                        `CHERRIES..SWEET...PRICE.RECEIVED..MEASURED.IN.....TON` +
+                        `TANGERINES...PRICE.RECEIVED..MEASURED.IN.....BOX..PHD.EQUIV`, df_train)
+summary(TREEModeltrim5)
+predTREEModeltrim5 <- predict(TREEModeltrim5, df_test, type = "vector")
+postResample(pred = predTREEModeltrim5, obs = df_test$`COFFEE...PRICE.RECEIVED..MEASURED.IN.....LB`)
+
+# TREEModeltrim5  ==>  R-Squared = 0.7895449
+
+# The relevant graphics are below
+predTREEModeltrim5
+
+xTr  <- seq(1, 12, 1)
+y1Tr <- predTREEModeltrim5
+y2Tr <- test$`COFFEE - PRICE RECEIVED, MEASURED IN $ / LB`
+dfTr <- data.frame(x,y1,y2)
+
+# This graphic shows the performance of the predTREEModeltrim5 in comparison with the real values on the test set.
+ggplot(dfTr, aes(x = xTr)) +                    
+  geom_point(aes(y=y1Tr, color="red")) + 
+  geom_point(aes(y=y2Tr, color="black")) +
+  geom_smooth(aes(y=y1Tr, color="red"),alpha = 0.5, se = FALSE) + 
+  geom_smooth(aes(y=y2Tr, color="black"),alpha = 0.5, se = FALSE) +
+  labs(x = "",y ="Price Recived ($/LB)\n", title ="Predicted and Real Vaues on Test Set\nPrediction Model = TREEModeltrim5\n", color = "") +
+  theme(plot.title = element_text(hjust = 0.5)) + 
+  #scale_x_continuous(seq(0, 12, 2)) + 
+  #scale_y_continuous(seq(0,4500,500)) + 
+  scale_color_manual(labels = c("Predicted", "Real"), values = c("red", "black"))
+
+# This graphic shows the correlation between the real and the predicted values over the test set.
+ggplot(dfTr, mapping = aes(x = y2Tr, y = y1Tr)) + 
+        geom_point(aes(color = "black"), size = 2) +
+        geom_smooth(aes(color="red"), alpha=0.5,se = FALSE) +
+        geom_smooth(method="lm", aes(color="blue")) + 
+        labs(x= "Real Values of Test Set\n", y = "Predicted Values over Test Set\n", title = "\nCorrelation Between Real and Predicted Values over Test Set\n Predictive Model = TREEModeltrim5", color ="") +
+        theme(plot.title = element_text(hjust = 0.5)) +
+        scale_color_manual(labels = c("Correlation-Points", "General Trend", "Correlation-Trend"), values = c("black", "red", "blue")) 
+
+# This graphic shows the tree illustration of the model
+plot(TREEModeltrim5)
+title("\nRegression Tree for Coffee Price Recieved\n")
+text(TREEModeltrim5, all = TRUE, cex = 0.25, srt =0, pretty = 8)
+```
+
+
+
